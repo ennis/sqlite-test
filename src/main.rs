@@ -8,6 +8,7 @@ use rpds::HashTrieMap;
 use rpds::Vector;
 use rusqlite::types::ValueRef;
 use rusqlite::{params, Connection, OpenFlags};
+use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
@@ -123,7 +124,6 @@ fn setup_schema(conn: &rusqlite::Connection) -> Result<()> {
 }
 
 impl Document {
-
     /// Opens a document.
     pub fn open(conn: &Connection) -> Result<Document> {
         setup_schema(conn)?;
@@ -132,7 +132,7 @@ impl Document {
         // load nodes
         let mut stmt = conn.prepare("select rowid, path from named_objects")?;
         let mut node_rows = stmt.query([])?;
-        let mut nodes = HashMap::new();
+        let mut nodes = Vec::new();
 
         while let Some(row) = node_rows.next()? {
             let id: i64 = row.get(0)?;
@@ -144,18 +144,44 @@ impl Document {
                 }
             };
 
-            nodes.insert(
-                path.clone(),
-                RefCell::new(Node {
+            nodes.push((
+                path.to_string(),
+                Node {
                     base: NamedObject { id, path },
                     children: Default::default(),
-                }),
-            );
+                },
+            ));
         }
 
-        // establish connections
+        nodes.sort_by(|(a, _), (b, _)| a.cmp(b));
+        //eprintln!("sorted nodes: {:#?}", nodes);
+
+        let mut document = Document {
+            root: Node {
+                base: NamedObject {
+                    id: 0,
+                    path: ModelPath::root(),
+                },
+                children: Default::default(),
+            },
+            share_groups: Default::default(),
+        };
+
+        // FIXME this is not very efficient
+        for (_, n) in nodes.iter() {
+            if n.base.path.is_root() {
+                document.root = n.clone();
+            } else {
+                let mut parent = document
+                    .find_node_mut(&n.base.path.parent().unwrap())
+                    .unwrap();
+                parent.add_child(n.clone());
+            }
+        }
+
+        /*// establish connections
         for (path, node) in nodes.iter() {
-            if let Some(parent) = path.parent() {
+            if let Some(parent) = node.borrow().base.path.parent() {
                 // TODO report error on non existent parent
                 let parent_node = nodes.get(&parent).unwrap();
                 parent_node.borrow_mut().add_child(node.borrow().clone());
@@ -166,12 +192,9 @@ impl Document {
             .get(&ModelPath::root())
             .ok_or(anyhow!("root node not found"))?
             .borrow()
-            .clone();
+            .clone();*/
 
-        Ok(Document {
-            root,
-            share_groups: Default::default(),
-        })
+        Ok(document)
     }
 
     pub fn write(&self, conn: &rusqlite::Connection) -> Result<()> {
@@ -198,6 +221,18 @@ impl Document {
                 parent.find_child_mut(&last)
             }
         }
+    }
+
+    fn insert_node(&mut self, node: Node) {
+        // to reconstruct: sort nodes by path, lexicographically?
+
+        // /a
+        // /a/b
+        // /a/b/c
+
+        let mut parent = self
+            .find_node_mut(&node.base.path.parent().unwrap())
+            .unwrap();
     }
 
     pub fn create_node(&mut self, conn: &rusqlite::Connection, path: ModelPath) -> Result<Node> {
